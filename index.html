@@ -99,6 +99,7 @@
       青ゲートは撃つと成長、撃ちすぎると <b>x2に進化</b>。赤ゲートも撃てば除染できる。<br>
       兵に上限はない — <b>99,999を超えるたびに★へオーバーフロー昇華</b>!<br>
       軍勢が育つほど敵も少し遅れて強くなるぞ。<br>
+      やがて訪れる<b>死線</b>では敵が本気を出すぞ。<br>
       移動: マウス / タッチ / ←→キー(攻撃は自動) / F2: スクリーンショット保存<br>
       <span style="color:#7f96c4">プレイ中はマウスカーソルが画面にロックされます (ESCで解除 / クリックで再ロック)</span>
     </div>
@@ -237,8 +238,8 @@ function newState() {
     time: 0,
     score: 0,
     kills: 0,
-    soldiers: 5 + 5 * meta.upStart,
-    trackedPower: 5 + 5 * meta.upStart,
+    soldiers: 10 + 5 * meta.upStart,
+    trackedPower: 10 + 5 * meta.upStart,
     bestSoldiers: 5,
     rank: 0,
     combo: 0,
@@ -256,7 +257,7 @@ function newState() {
     fireTimer: 0,
     muzzle: 0,
     spawnTimer: 1.5,
-    gateTimer: 4,
+    gateTimer: 1.5,
     bossTimer: 40,
     bossAlive: false,
     pendingMod: { hpAdd: 0, countMul: 1 }, // 捨てたゲートを敵が拾った分 (次ウェーブに適用)
@@ -266,11 +267,29 @@ function newState() {
     shotFlash: 0,
     splits: [],        // 30秒毎のスコアスナップショット (PB比較用)
     nextSplitAt: 30,
+    hardAnnounced: false, // 死線突入演出を一度だけ出すフラグ
   };
 }
 
 // 難易度 (エンドレス: 時間で無限にスケール)
 function level() { return Math.floor(state.time / 18) + 1; }
+// ---------- ハードモード「死線」 (バランスチューニング用ノブ) ----------
+const HARD = {
+  startWave: 13,        // このWAVEから死線
+  hpRamp: 0.05,         // 死線中、WAVE毎に敵HP複利 +5%
+  countGrow: 0.25,      // 死線中、WAVE毎に湧き数係数 +0.25 (上限4) — 必ず追い越してくる洪水
+  intervalGrow: 0.12,   // 死線中、WAVE毎に湧き間隔短縮 +0.12 (上限2.4)
+  eliteChance: 0.08,    // エリート敵率 (HP×2.5・速度×1.15)
+  bossEvery: 34,        // ボス周期秒 (通常40)
+  volleyBonus: 2,       // ボス弾幕の追加弾数
+};
+function hardMode() { return level() >= HARD.startWave; }
+function hardHpMul() { const over = level() - HARD.startWave; return over < 0 ? 1 : Math.pow(1 + HARD.hpRamp, over + 1); }
+// 死線の圧 = 数の洪水。巨大軍は敵を全てワンショットするため、実効的な脅威は
+// 「湧き数 vs 弾のスループット」だけ — だから上限定数ではなくウェーブ毎に成長させ、
+// どんな軍でもいつか飲まれる (入口は穏やか、終わりは必然)
+function swarmCountCap() { const over = Math.max(0, level() - HARD.startWave); return Math.min(4, 1.5 + HARD.countGrow * over); }
+function swarmIntervalCap() { const over = Math.max(0, level() - HARD.startWave); return Math.min(2.4, 1.2 + HARD.intervalGrow * over); }
 // 兵数は無制限。99,999ごとに★へオーバーフロー昇華する (オドメーター式プレステージ)
 const STAR_UNIT = 99999;
 // 敵HPは遅延追従ラバーバンド (trackedPower参照、指数0.6・倍率上限3)。
@@ -280,12 +299,15 @@ function enemyRawScale() {
 }
 function enemyBaseHp() {
   const lv = level();
-  return Math.ceil((lv * lv * 1.3 + lv * 4 + 2) * Math.min(enemyRawScale(), 3));
+  return Math.ceil((lv * lv * 1.15 + lv * 3.5 + 2) * Math.min(enemyRawScale(), 3) * hardHpMul());
 }
 function swarmFactor() { return Math.max(1, enemyRawScale() / 3); }
 function enemySpeed() { return 45 + Math.min(level() * 5, 150); }
 function spawnInterval() {
-  const base = Math.max(1.35 - level() * 0.05, 0.55) / Math.min(swarmFactor(), 1.5);
+  // 序盤ランプ: 初期軍勢(5兵)のDPSでは開幕の湧き密度を捌けないため、
+  // 最初の90秒は湧きを間引いて「成長してから本番」にする
+  const ramp = Math.min(1, 0.40 + state.time * 0.6 / 90);
+  const base = Math.max(1.35 - level() * 0.05, 0.55) / (Math.min(swarmFactor(), swarmIntervalCap()) * ramp);
   return state.bossAlive ? base * 1.4 : base;
 }
 function heatMul() { return 1 + Math.min(Math.floor(state.combo / 10) * 0.5, 4); }
@@ -375,11 +397,11 @@ function loseSoldiers(loss, x, label) {
 function rollEnemyType() {
   const lv = level();
   const pool = [["normal", 10]];
-  if (lv >= 2) pool.push(["speeder", 3 + Math.min(lv, 7)]);
-  if (lv >= 3) pool.push(["tank", 2 + Math.min(lv, 6)]);
-  if (lv >= 4) pool.push(["splitter", 2 + Math.min(lv, 5)]);
-  if (lv >= 4) pool.push(["shooter", 2 + Math.min(lv, 5)]);
-  if (lv >= 5) pool.push(["diver", 2 + Math.min(lv, 5)]);
+  if (lv >= 3) pool.push(["speeder", 3 + Math.min(lv, 7)]);
+  if (lv >= 4) pool.push(["tank", 2 + Math.min(lv, 6)]);
+  if (lv >= 5) pool.push(["splitter", 2 + Math.min(lv, 5)]);
+  if (lv >= 6) pool.push(["shooter", 2 + Math.min(lv, 5)]);
+  if (lv >= 7) pool.push(["diver", 2 + Math.min(lv, 5)]);
   let total = 0;
   for (const p of pool) total += p[1];
   let r = Math.random() * total;
@@ -417,6 +439,12 @@ function makeEnemy(type, x, y, hpFactor) {
     default:
       e.r = 16; e.hp = Math.ceil(hp * hpFactor); e.vy = spd * (0.85 + Math.random() * 0.3); e.wobAmp = 14;
   }
+  // 死線エリート: 一部の敵が突然変異 (HP×2.5・速度×1.15)。ボスには適用しない
+  if (!e.boss && hardMode() && Math.random() < HARD.eliteChance) {
+    e.elite = true;
+    e.hp = Math.ceil(e.hp * 2.5);
+    e.vy *= 1.15;
+  }
   e.maxHp = e.hp;
   return e;
 }
@@ -425,7 +453,7 @@ function spawnWave() {
   const lv = level();
   const mod = state.pendingMod;
   let count = Math.min(3 + Math.floor(lv / 3) + Math.floor(Math.random() * 3), 12);
-  count = Math.min(Math.round(count * mod.countMul * Math.min(swarmFactor(), 2)), 32);
+  count = Math.min(Math.round(count * mod.countMul * Math.min(swarmFactor(), swarmCountCap())), hardMode() ? 40 : 26);
   const cx = 60 + Math.random() * (W - 120);
   for (let i = 0; i < count; i++) {
     const e = makeEnemy(rollEnemyType(), cx + (Math.random() - 0.5) * 140, -30 - Math.random() * 90, 0.7 + Math.random() * 0.6);
@@ -453,6 +481,8 @@ function spawnBoss() {
   e.volleyTimer = 3.5;
   state.enemies.push(e);
   state.bossAlive = true;
+  // 次のボスまでの周期: 死線では短縮 (撃破時のリセットは40のまま=居座り続ける限り無効)
+  state.bossTimer = hardMode() ? HARD.bossEvery : 40;
   addFloatText(W / 2, 120, "⚠ BOSS接近 — 倒すまで居座るぞ ⚠", "#ff6b6b", 18);
 }
 
@@ -467,7 +497,10 @@ function spawnGatePair(forcedGood, atY) {
   const gateBonus = 3 * meta.upGate;
   const goodPool = [
     () => ({ kind: "add", val: 5 + Math.floor(Math.random() * 6) + lv + gateBonus, hits: 0 }),
-    () => ({ kind: "mul", val: 2 }),
+    // 3万兵超は x2 をデカい+Nに置換しがちにする — 指数成長の暴走を線形に減速
+    () => (state.soldiers >= 30000 && Math.random() < 0.6
+      ? { kind: "add", val: Math.ceil(state.soldiers * 0.10) + 10 + lv * 2 + gateBonus, hits: 0 }
+      : { kind: "mul", val: 2 }),
     () => (Math.random() < 0.15 ? { kind: "mul", val: 3 }
                                  : { kind: "add", val: 10 + lv * 2 + gateBonus, hits: 0 }),
   ];
@@ -492,7 +525,7 @@ function spawnGatePair(forcedGood, atY) {
   state.gates.push({
     y: atY !== undefined ? atY : -40,
     vy: 55 + Math.min(lv * 2.5, 50),
-    evolveNeed: 12 + lv * 2 + state.rank * 3,
+    evolveNeed: 12 + lv * 2 + state.rank * 3 + Math.ceil(state.soldiers / 40), // 大軍ほど進化困難 — x2無限増殖の暴走を防ぐ
     left:  Object.assign({ x: 20, w: gw }, leftFirst ? a : b),
     right: Object.assign({ x: W / 2 + 10, w: gw }, leftFirst ? b : a),
     done: false,
@@ -621,6 +654,14 @@ function update(dt) {
   if (state.freeze > 0) { state.freeze -= dt; return; } // ヒットストップ
 
   state.time += dt;
+  // 死線突入: 一度だけ警告演出を出す
+  if (!state.hardAnnounced && hardMode()) {
+    state.hardAnnounced = true;
+    addFloatText(W / 2, H / 2 - 60, "⚠ 死線突入 ⚠", "#ff4444", 30);
+    addFloatText(W / 2, H / 2 - 30, "敵軍、本気。生きて帰れ", "#ff9f43", 14);
+    state.shake = Math.max(state.shake, 0.4);
+    beep(110, 0.6, "sawtooth", 0.08);
+  }
   // 敵の諜報は約15秒遅れる: x2直後の無双ウィンドウを保証する遅延追従
   const pw = state.soldiers * (1 + state.rank * 0.1);
   state.trackedPower += (pw - state.trackedPower) * Math.min(1, dt / 15);
@@ -713,7 +754,7 @@ function update(dt) {
         e.volleyTimer -= dt;
         if (e.volleyTimer <= 0) {
           e.volleyTimer = Math.max(3.5 - level() * 0.06, 2.2);
-          const n = 5 + Math.min(Math.floor(level() / 3), 4);
+          const n = 5 + Math.min(Math.floor(level() / 3), 4) + (hardMode() ? HARD.volleyBonus : 0);
           for (let i = 0; i < n; i++) {
             const ang = Math.PI * (0.3 + 0.4 * i / (n - 1));
             const sp = 130 + level() * 3;
@@ -805,8 +846,10 @@ function update(dt) {
     // 自軍と接触 → 兵が減る + コンボ途切れ
     if (e.hp > 0 && !e.boss && state.invuln <= 0 &&
         e.y > SQUAD_Y - 30 && Math.abs(e.x - state.squadX) < 70) {
-      // 接触ロスは敵HPと自軍規模の大きい方: 大軍でも接触は必ず痛い
-      const loss = Math.max(2, Math.ceil(e.hp / 1.5), Math.ceil(state.soldiers * 0.1));
+      // 接触ロスは敵HPと自軍規模の大きい方: 大軍でも接触は必ず痛い。
+      // ただしHP由来項は兵力30%+5で頭打ち — 序盤にタンク1接触で全滅する理不尽を防ぐ
+      const hpLoss = Math.min(Math.ceil(e.hp / 1.5), Math.ceil(state.soldiers * 0.18) + 4);
+      const loss = Math.max(2, hpLoss, Math.ceil(state.soldiers * 0.1));
       e.hp = 0;
       burst(e.x, SQUAD_Y - 20, "#ff5555", 16);
       loseSoldiers(loss, e.x, "");
@@ -818,13 +861,15 @@ function update(dt) {
   for (const gp of state.gates) {
     gp.y += gp.vy * dt;
 
-    // ゲート撃ち込み: 青は成長(撃ちすぎるとx2に進化)、赤は除染
+    // ゲート撃ち込み: 青は成長(撃ちすぎるとx2に進化)、赤は除染。
+    // 弾は消えず半減して貫通する — ゲートを育てる間も防御力がゼロにならない
     for (const side of [gp.left, gp.right]) {
       if (side.kind !== "add") continue;
       for (const b of state.bullets) {
-        if (b.dead) continue;
+        if (b.dead || b.gateHit === side) continue;
         if (b.y < gp.y + 22 && b.y > gp.y - 22 && b.x > side.x && b.x < side.x + side.w) {
-          b.dead = true;
+          b.gateHit = side;
+          b.dmg = Math.max(1, Math.floor(b.dmg * 0.5));
           if (side.val < 0) {
             // 除染は弾ダメージ比例: 負値は兵力スケールするので固定+1では形骸化する
             side.val = Math.min(side.val + Math.max(1, Math.ceil(b.dmg * 0.5)), 1);
@@ -1184,6 +1229,15 @@ function drawEnemy(e) {
   }
   ctx.restore();
 
+  // 死線エリートの目印: 金色のリング
+  if (e.elite) {
+    ctx.strokeStyle = "#ffd24d";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(x, y, r + 3, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+
   // HPバー + 数値
   const bw = r * 2;
   ctx.fillStyle = "rgba(0,0,0,.5)";
@@ -1322,7 +1376,13 @@ function draw() {
   ctx.textAlign = "left";
   ctx.fillText("SCORE " + Math.floor(state.score), 12, 26);
   ctx.textAlign = "right";
-  ctx.fillText("WAVE " + level(), W - 12, 26);
+  if (hardMode()) {
+    ctx.fillStyle = "#ff6b6b";
+    ctx.fillText("WAVE " + level() + " 死線", W - 12, 26);
+    ctx.fillStyle = "#fff";
+  } else {
+    ctx.fillText("WAVE " + level(), W - 12, 26);
+  }
   ctx.textAlign = "left";
   ctx.fillStyle = "#9db4e0";
   ctx.font = "12px sans-serif";

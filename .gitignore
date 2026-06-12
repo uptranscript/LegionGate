@@ -1,3 +1,5 @@
 *.bak
 .claude/
 CLAUDE.md
+sim/results/
+sim/.game-snapshot.html
