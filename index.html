@@ -1,0 +1,1438 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>軍勢ゲートシューター</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    background: #0a0e1a;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: "Segoe UI", "Hiragino Sans", "Meiryo", sans-serif;
+    overflow: hidden;
+    touch-action: none;
+  }
+  #wrap { position: relative; }
+  canvas {
+    display: block;
+    background: linear-gradient(#101830, #1a2440);
+    border-radius: 8px;
+    box-shadow: 0 0 40px rgba(80, 140, 255, .25);
+    cursor: crosshair;
+  }
+  #overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    background: rgba(5, 8, 18, .88);
+    border-radius: 8px;
+    color: #fff;
+    text-align: center;
+    padding: 16px;
+    overflow-y: auto;
+  }
+  #overlay.hidden { display: none; }
+  #overlay h1 { font-size: 30px; letter-spacing: 2px; }
+  #overlay .sub { color: #9db4e0; font-size: 13px; line-height: 1.7; }
+  #overlay .score-line { font-size: 18px; color: #ffd866; line-height: 1.6; }
+  #overlay button.main {
+    font-size: 18px;
+    padding: 12px 38px;
+    border: none;
+    border-radius: 999px;
+    background: linear-gradient(#5b8cff, #3a63d8);
+    color: #fff;
+    cursor: pointer;
+    letter-spacing: 1px;
+    box-shadow: 0 4px 16px rgba(70, 120, 255, .5);
+  }
+  #overlay button.main:hover { filter: brightness(1.15); }
+  #shop {
+    width: 100%;
+    max-width: 380px;
+    background: rgba(255, 255, 255, .06);
+    border: 1px solid rgba(255, 255, 255, .15);
+    border-radius: 10px;
+    padding: 10px 12px;
+  }
+  #shop h2 { font-size: 14px; color: #ffd866; margin-bottom: 6px; }
+  .shop-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 5px 0;
+    font-size: 13px;
+    color: #cfe0ff;
+  }
+  .shop-row .desc { text-align: left; flex: 1; }
+  .shop-row .lv { color: #8aa3d0; font-size: 11px; }
+  .shop-row button {
+    border: none;
+    border-radius: 6px;
+    padding: 6px 12px;
+    background: #2e9e5b;
+    color: #fff;
+    cursor: pointer;
+    font-size: 13px;
+    min-width: 86px;
+  }
+  .shop-row button:disabled { background: #3a4660; color: #8294b5; cursor: default; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="480" height="720"></canvas>
+  <div id="overlay">
+    <h1 id="title">軍勢ゲートシューター</h1>
+    <div class="sub" id="howto">
+      迫りくる軍勢を撃ち倒しながら左右のゲートを選べ!<br>
+      <b>捨てたゲートは敵が拾う</b> — 選択は常にトレードオフ。<br>
+      青ゲートは撃つと成長、撃ちすぎると <b>x2に進化</b>。赤ゲートも撃てば除染できる。<br>
+      兵に上限はない — <b>99,999を超えるたびに★へオーバーフロー昇華</b>!<br>
+      軍勢が育つほど敵も少し遅れて強くなるぞ。<br>
+      移動: マウス / タッチ / ←→キー(攻撃は自動) / F2: スクリーンショット保存<br>
+      <span style="color:#7f96c4">プレイ中はマウスカーソルが画面にロックされます (ESCで解除 / クリックで再ロック)</span>
+    </div>
+    <div class="score-line" id="resultLine" style="display:none"></div>
+    <div id="shop"></div>
+    <button id="startBtn" class="main">スタート</button>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = canvas.width, H = canvas.height;
+
+const overlay = document.getElementById("overlay");
+const startBtn = document.getElementById("startBtn");
+const resultLine = document.getElementById("resultLine");
+const titleEl = document.getElementById("title");
+const shopEl = document.getElementById("shop");
+
+// ---------- 永続メタ (勲章 / 恒久強化 / 自己ベスト) ----------
+const META_KEY = "gunzeiGateShooterMeta_v1";
+let meta = loadMeta();
+function loadMeta() {
+  try {
+    const m = JSON.parse(localStorage.getItem(META_KEY));
+    if (m && typeof m === "object") {
+      return Object.assign({ medals: 0, upStart: 0, upGate: 0, upMedal: 0, bestScore: 0, pbSplits: [] }, m);
+    }
+  } catch (e) {}
+  return { medals: 0, upStart: 0, upGate: 0, upMedal: 0, bestScore: 0, pbSplits: [] };
+}
+function saveMeta() {
+  try { localStorage.setItem(META_KEY, JSON.stringify(meta)); } catch (e) {}
+}
+const SHOP_DEFS = [
+  { key: "upStart", name: "初期兵力", desc: lv => "開始兵数 +" + (5 * lv) + " → +" + (5 * (lv + 1)), cost: lv => 10 * Math.pow(2, lv) },
+  { key: "upGate", name: "ゲート育成", desc: lv => "青ゲート初期値 +" + (3 * lv) + " → +" + (3 * (lv + 1)), cost: lv => 12 * Math.pow(2, lv) },
+  { key: "upMedal", name: "勲章収集", desc: lv => "勲章獲得 +" + (20 * lv) + "% → +" + (20 * (lv + 1)) + "%", cost: lv => 15 * Math.pow(2, lv) },
+];
+function renderShop() {
+  let html = "<h2>🎖 勲章ショップ — 所持 " + meta.medals + " 勲章 / 自己ベスト " + Math.floor(meta.bestScore) + "</h2>";
+  for (const d of SHOP_DEFS) {
+    const lv = meta[d.key];
+    const cost = d.cost(lv);
+    html += '<div class="shop-row"><div class="desc">' + d.name +
+      ' <span class="lv">Lv' + lv + "</span><br><span style='font-size:11px;color:#9db4e0'>" + d.desc(lv) + "</span></div>" +
+      "<button data-key='" + d.key + "' " + (meta.medals < cost ? "disabled" : "") + ">🎖" + cost + "</button></div>";
+  }
+  shopEl.innerHTML = html;
+  shopEl.querySelectorAll("button[data-key]").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const key = btn.dataset.key;
+      const def = SHOP_DEFS.find(d => d.key === key);
+      const cost = def.cost(meta[key]);
+      if (meta.medals >= cost) {
+        meta.medals -= cost;
+        meta[key]++;
+        saveMeta();
+        renderShop();
+        beep(990, 0.12, "triangle", 0.06);
+      }
+    });
+  });
+}
+
+// ---------- サウンド ----------
+let audioCtx = null;
+function beep(freq, dur, type = "square", vol = 0.04) {
+  if (!audioCtx) return;
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = type;
+  o.frequency.value = freq;
+  g.gain.value = vol;
+  g.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + dur);
+  o.connect(g).connect(audioCtx.destination);
+  o.start();
+  o.stop(audioCtx.currentTime + dur);
+}
+function chord(freqs, dur, vol) {
+  for (const f of freqs) beep(f, dur, "triangle", vol);
+}
+
+// ---------- スクリーンショット (F2: スタッツ刻印付きPNG) ----------
+function takeScreenshot() {
+  const pad = n => String(n).padStart(2, "0");
+  const d = new Date();
+  const stamp = "" + d.getFullYear() + pad(d.getMonth() + 1) + pad(d.getDate()) +
+    "-" + pad(d.getHours()) + pad(d.getMinutes()) + pad(d.getSeconds());
+  const tmp = document.createElement("canvas");
+  tmp.width = W;
+  tmp.height = H + 34;
+  const tctx = tmp.getContext("2d");
+  // ゲーム画面の背景はCSSグラデーションで、canvasのピクセルは透明。
+  // toBlobに背景が写らないため、同じグラデーションを下敷きに焼き込む
+  const bg = tctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, "#101830");
+  bg.addColorStop(1, "#1a2440");
+  tctx.fillStyle = bg;
+  tctx.fillRect(0, 0, W, H);
+  tctx.drawImage(canvas, 0, 0);
+  tctx.fillStyle = "#0a0e1a";
+  tctx.fillRect(0, H, W, 34);
+  tctx.fillStyle = "#ffd866";
+  tctx.font = "bold 13px sans-serif";
+  tctx.textAlign = "center";
+  const info = state
+    ? "兵 " + state.soldiers.toLocaleString() + (state.rank > 0 ? " ★" + state.rank : "") +
+      " / WAVE " + level() + " / SCORE " + Math.floor(state.score) + " / " + stamp
+    : "軍勢ゲートシューター / " + stamp;
+  tctx.fillText(info, W / 2, H + 22);
+  tmp.toBlob(blob => {
+    if (!blob) return;
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "gate-shooter_" + stamp + ".png";
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  }, "image/png");
+  if (state) state.shotFlash = 0.12;
+  beep(1500, 0.07, "square", 0.05);
+}
+
+// ---------- 状態 ----------
+const SQUAD_Y = H - 80;
+const RANK_COLORS = ["#5b9fe0", "#58d68d", "#f5b041", "#ff7b54", "#c39bff", "#7ff3ff", "#ff9ff5", "#ffe066"];
+const RANK_DARK   = ["#36648f", "#35865a", "#9c7128", "#a34a32", "#7d61a8", "#4d9aa3", "#a4639d", "#a89143"];
+let state = null;
+
+function newState() {
+  return {
+    running: false,
+    time: 0,
+    score: 0,
+    kills: 0,
+    soldiers: 5 + 5 * meta.upStart,
+    trackedPower: 5 + 5 * meta.upStart,
+    bestSoldiers: 5,
+    rank: 0,
+    combo: 0,
+    maxCombo: 0,
+    squadX: W / 2,
+    targetX: W / 2,
+    bullets: [],
+    eBullets: [],      // 敵の弾
+    enemies: [],
+    gates: [],
+    lastPairTrap: false,
+    particles: [],
+    floatTexts: [],
+    lightnings: [],
+    fireTimer: 0,
+    muzzle: 0,
+    spawnTimer: 1.5,
+    gateTimer: 4,
+    bossTimer: 40,
+    bossAlive: false,
+    pendingMod: { hpAdd: 0, countMul: 1 }, // 捨てたゲートを敵が拾った分 (次ウェーブに適用)
+    freeze: 0,
+    shake: 0,
+    invuln: 0,
+    shotFlash: 0,
+    splits: [],        // 30秒毎のスコアスナップショット (PB比較用)
+    nextSplitAt: 30,
+  };
+}
+
+// 難易度 (エンドレス: 時間で無限にスケール)
+function level() { return Math.floor(state.time / 18) + 1; }
+// 兵数は無制限。99,999ごとに★へオーバーフロー昇華する (オドメーター式プレステージ)
+const STAR_UNIT = 99999;
+// 敵HPは遅延追従ラバーバンド (trackedPower参照、指数0.6・倍率上限3)。
+// 上限を超えたパワー優位はHPでなく湧き数に振り替える (swarmFactor)
+function enemyRawScale() {
+  return Math.pow(1 + state.trackedPower / 800, 0.6);
+}
+function enemyBaseHp() {
+  const lv = level();
+  return Math.ceil((lv * lv * 1.3 + lv * 4 + 2) * Math.min(enemyRawScale(), 3));
+}
+function swarmFactor() { return Math.max(1, enemyRawScale() / 3); }
+function enemySpeed() { return 45 + Math.min(level() * 5, 150); }
+function spawnInterval() {
+  const base = Math.max(1.35 - level() * 0.05, 0.55) / Math.min(swarmFactor(), 1.5);
+  return state.bossAlive ? base * 1.4 : base;
+}
+function heatMul() { return 1 + Math.min(Math.floor(state.combo / 10) * 0.5, 4); }
+function heatTier() { return Math.min(Math.floor(state.combo / 10), 4); }
+function dmgMul() { return 1 + state.rank * 0.1; } // ★ごとの僅かな火力クリープ
+
+// ---------- 入力 (Pointer Lock: カーソルが画面外に出ない) ----------
+const keys = {};
+let debugHud = false; // F3でトグルする開発用バランス計測オーバーレイ
+addEventListener("keydown", e => {
+  if (e.key === "F2") { e.preventDefault(); takeScreenshot(); return; }
+  if (e.key === "F3") { e.preventDefault(); debugHud = !debugHud; return; }
+  keys[e.key] = true;
+});
+addEventListener("keyup", e => { keys[e.key] = false; });
+
+let pointerLocked = false;
+document.addEventListener("pointerlockchange", () => {
+  pointerLocked = document.pointerLockElement === canvas;
+});
+function requestLock() {
+  try { canvas.requestPointerLock(); } catch (e) {}
+}
+canvas.addEventListener("click", () => {
+  if (state && state.running && !pointerLocked) requestLock();
+});
+
+function clampTarget() {
+  state.targetX = Math.max(30, Math.min(W - 30, state.targetX));
+}
+function pointerMoveAbs(clientX) {
+  const r = canvas.getBoundingClientRect();
+  state.targetX = (clientX - r.left) * (W / r.width);
+  clampTarget();
+}
+document.addEventListener("mousemove", e => {
+  if (!state) return;
+  if (pointerLocked) {
+    const r = canvas.getBoundingClientRect();
+    state.targetX += e.movementX * (W / r.width);
+    clampTarget();
+  }
+});
+canvas.addEventListener("mousemove", e => {
+  if (state && !pointerLocked) pointerMoveAbs(e.clientX);
+});
+canvas.addEventListener("touchmove", e => {
+  e.preventDefault();
+  if (state) pointerMoveAbs(e.touches[0].clientX);
+}, { passive: false });
+canvas.addEventListener("touchstart", e => {
+  e.preventDefault();
+  if (state) pointerMoveAbs(e.touches[0].clientX);
+}, { passive: false });
+
+// ---------- 兵数の増減と精鋭ランク ----------
+function setSoldiers(n) {
+  const beforeStar = Math.floor(state.soldiers / STAR_UNIT);
+  state.soldiers = Math.max(0, Math.round(n)); // 上限なし
+  const star = Math.floor(state.soldiers / STAR_UNIT);
+  if (star > beforeStar) {
+    // 99,999を超えるたびに★へ昇華 (数値はそのまま持ち越し、表示が桁上がりする)
+    addFloatText(state.squadX, SQUAD_Y - 80, "★転生! オーバーフロー昇華 ★" + star, "#ffe066", 22);
+    addFloatText(state.squadX, SQUAD_Y - 104, "敵軍も覚醒する…!", "#ff9f43", 13);
+    burst(state.squadX, SQUAD_Y, "#ffe066", 50);
+    state.freeze = Math.max(state.freeze, 0.15);
+    state.shake = Math.max(state.shake, 0.3);
+    chord([523, 659, 784, 1047], 0.5, 0.06);
+  }
+  state.rank = star;
+  state.bestSoldiers = Math.max(state.bestSoldiers, state.soldiers);
+}
+
+function loseSoldiers(loss, x, label) {
+  loss = Math.min(state.soldiers, loss);
+  if (loss <= 0) return;
+  setSoldiers(state.soldiers - loss);
+  addFloatText(state.squadX, SQUAD_Y - 60, "-" + loss + " 兵" + (label ? " (" + label + ")" : ""), "#ff5555", 20);
+  if (state.combo >= 10) addFloatText(state.squadX, SQUAD_Y - 84, "コンボ途切れ…", "#8aa3d0", 13);
+  state.combo = 0;
+  state.shake = 0.25;
+  beep(120, 0.25, "sawtooth", 0.07);
+  if (state.soldiers <= 0) gameOver();
+}
+
+// ---------- 敵スポーン ----------
+function rollEnemyType() {
+  const lv = level();
+  const pool = [["normal", 10]];
+  if (lv >= 2) pool.push(["speeder", 3 + Math.min(lv, 7)]);
+  if (lv >= 3) pool.push(["tank", 2 + Math.min(lv, 6)]);
+  if (lv >= 4) pool.push(["splitter", 2 + Math.min(lv, 5)]);
+  if (lv >= 4) pool.push(["shooter", 2 + Math.min(lv, 5)]);
+  if (lv >= 5) pool.push(["diver", 2 + Math.min(lv, 5)]);
+  let total = 0;
+  for (const p of pool) total += p[1];
+  let r = Math.random() * total;
+  for (const p of pool) { r -= p[1]; if (r <= 0) return p[0]; }
+  return "normal";
+}
+
+function makeEnemy(type, x, y, hpFactor) {
+  const hp = enemyBaseHp();
+  const spd = enemySpeed();
+  const e = {
+    type, x, y,
+    wob: Math.random() * Math.PI * 2,
+    vx: (Math.random() - 0.5) * 30,
+    boss: false,
+    eatState: null,
+  };
+  switch (type) {
+    case "speeder":
+      e.r = 11; e.hp = Math.ceil(hp * 0.45 * hpFactor); e.vy = spd * 1.8; e.wobAmp = 38; break;
+    case "tank":
+      e.r = 24; e.hp = Math.ceil(hp * 3.2 * hpFactor); e.vy = spd * 0.55; e.wobAmp = 5; break;
+    case "splitter":
+      e.r = 18; e.hp = Math.ceil(hp * 1.2 * hpFactor); e.vy = spd * 0.85; e.wobAmp = 14; break;
+    case "eater":
+      e.r = 14; e.hp = Math.ceil(hp * 1.5 * hpFactor); e.vy = spd * 0.7; e.wobAmp = 0; e.eatState = "seek"; break;
+    case "shooter":
+      e.r = 15; e.hp = Math.ceil(hp * 1.6 * hpFactor); e.vy = spd * 0.8; e.wobAmp = 4;
+      e.stopY = 200 + Math.random() * 140; e.shotTimer = 1.2 + Math.random(); break;
+    case "diver":
+      e.r = 13; e.hp = Math.ceil(hp * 0.8 * hpFactor); e.vy = spd * 0.7; e.wobAmp = 10;
+      e.diveAt = 230 + Math.random() * 80; e.diving = false; break;
+    case "minion":
+      e.r = 10; e.hp = Math.ceil(hp * 0.5 * hpFactor); e.vy = spd * 1.2; e.wobAmp = 20; break;
+    default:
+      e.r = 16; e.hp = Math.ceil(hp * hpFactor); e.vy = spd * (0.85 + Math.random() * 0.3); e.wobAmp = 14;
+  }
+  e.maxHp = e.hp;
+  return e;
+}
+
+function spawnWave() {
+  const lv = level();
+  const mod = state.pendingMod;
+  let count = Math.min(3 + Math.floor(lv / 3) + Math.floor(Math.random() * 3), 12);
+  count = Math.min(Math.round(count * mod.countMul * Math.min(swarmFactor(), 2)), 32);
+  const cx = 60 + Math.random() * (W - 120);
+  for (let i = 0; i < count; i++) {
+    const e = makeEnemy(rollEnemyType(), cx + (Math.random() - 0.5) * 140, -30 - Math.random() * 90, 0.7 + Math.random() * 0.6);
+    e.hp += Math.ceil(mod.hpAdd / 2);
+    e.maxHp = e.hp;
+    state.enemies.push(e);
+  }
+  // ゲートイーター: ゲートがあるとき時々湧いてゲートの数値を食いに行く
+  if (lv >= 3 && state.gates.some(g => !g.done) && Math.random() < 0.35) {
+    const side = Math.random() < 0.5 ? -20 : W + 20;
+    const ee = makeEnemy("eater", side, 60 + Math.random() * 120, 1);
+    state.enemies.push(ee);
+  }
+  if (mod.hpAdd > 0 || mod.countMul > 1) {
+    state.pendingMod = { hpAdd: 0, countMul: 1 };
+  }
+}
+
+function spawnBoss() {
+  const hp = enemyBaseHp() * 20;
+  const e = makeEnemy("normal", W / 2, -60, 1);
+  e.boss = true; e.r = 38; e.hp = hp; e.maxHp = hp;
+  e.vy = enemySpeed() * 0.42; e.vx = 0; e.wobAmp = 0;
+  e.minionTimer = 2.2;
+  e.volleyTimer = 3.5;
+  state.enemies.push(e);
+  state.bossAlive = true;
+  addFloatText(W / 2, 120, "⚠ BOSS接近 — 倒すまで居座るぞ ⚠", "#ff6b6b", 18);
+}
+
+function fireEnemyBullet(x, y, tx, ty, speed) {
+  const d = Math.hypot(tx - x, ty - y) || 1;
+  state.eBullets.push({ x, y, vx: (tx - x) / d * speed, vy: (ty - y) / d * speed });
+}
+
+// ---------- ゲート ----------
+function spawnGatePair(forcedGood, atY) {
+  const lv = level();
+  const gateBonus = 3 * meta.upGate;
+  const goodPool = [
+    () => ({ kind: "add", val: 5 + Math.floor(Math.random() * 6) + lv + gateBonus, hits: 0 }),
+    () => ({ kind: "mul", val: 2 }),
+    () => (Math.random() < 0.15 ? { kind: "mul", val: 3 }
+                                 : { kind: "add", val: 10 + lv * 2 + gateBonus, hits: 0 }),
+  ];
+  const anyPool = [
+    ...goodPool,
+    () => ({ kind: "add", val: -(8 + Math.floor(Math.random() * 12) + lv + Math.ceil(14 * Math.log2(1 + state.soldiers / 60))), hits: 0 }),
+    () => ({ kind: "div", val: 2 }),
+  ];
+  // WAVE5以降は「片方必ず良ゲート」の保証が60%の確率で消える (両方罠もありうる)
+  const guaranteeGood = forcedGood || lv < 5 || Math.random() < 0.4;
+  let a = (guaranteeGood ? goodPool : anyPool)[Math.floor(Math.random() * (guaranteeGood ? goodPool : anyPool).length)]();
+  let b = (forcedGood ? goodPool : anyPool)[Math.floor(Math.random() * (forcedGood ? goodPool : anyPool).length)]();
+  // 同種罠ペア(÷2|÷2、負add|負add)は確定損失なので禁止。
+  // 異種の両罠ペアは緊張感として許すが連続出現はさせない(クールダウン1ペア)。
+  const isTrap = g => !gateIsGood(g);
+  if (isTrap(a) && isTrap(b) && (a.kind === b.kind || state.lastPairTrap)) {
+    b = goodPool[Math.floor(Math.random() * goodPool.length)]();
+  }
+  state.lastPairTrap = isTrap(a) && isTrap(b);
+  const leftFirst = Math.random() < 0.5;
+  const gw = W / 2 - 30;
+  state.gates.push({
+    y: atY !== undefined ? atY : -40,
+    vy: 55 + Math.min(lv * 2.5, 50),
+    evolveNeed: 12 + lv * 2 + state.rank * 3,
+    left:  Object.assign({ x: 20, w: gw }, leftFirst ? a : b),
+    right: Object.assign({ x: W / 2 + 10, w: gw }, leftFirst ? b : a),
+    done: false,
+  });
+}
+
+function gateLabel(g) {
+  if (g.kind === "add") return (g.val >= 0 ? "+" : "") + g.val;
+  if (g.kind === "mul") return "x" + g.val;
+  return "÷" + g.val;
+}
+function gateIsGood(g) { return (g.kind === "add" && g.val >= 0) || g.kind === "mul"; }
+function gateResult(g, n) {
+  if (g.kind === "add") return n + g.val;
+  if (g.kind === "mul") return n * g.val;
+  return Math.floor(n / g.val);
+}
+// 捨てたゲートを敵が拾ったときの効果: 敵が得をするのは正の価値物だけ。罠は拾われず自壊する
+function skipEffect(g) {
+  if (!gateIsGood(g)) return { hpAdd: 0, countMul: 1 };
+  if (g.kind === "add") return { hpAdd: Math.ceil(g.val * 0.75), countMul: 1 };
+  return { hpAdd: 0, countMul: Math.min(g.val, 3) };
+}
+function skipLabel(g) {
+  const s = skipEffect(g);
+  if (s.countMul > 1) return "捨→敵x" + s.countMul;
+  if (s.hpAdd > 0) return "捨→敵+" + s.hpAdd;
+  return "捨→無害";
+}
+
+function applyGate(chosen, skipped) {
+  const before = state.soldiers;
+  setSoldiers(gateResult(chosen, state.soldiers));
+  const diff = state.soldiers - before;
+  addFloatText(state.squadX, SQUAD_Y - 50,
+    (diff >= 0 ? "+" : "") + diff + " 兵", diff >= 0 ? "#6bff9e" : "#ff6b6b", 20);
+  beep(diff >= 0 ? 880 : 180, 0.18, diff >= 0 ? "triangle" : "sawtooth", 0.06);
+  if (chosen.kind === "mul" && diff > 0) chord([880, 1100], 0.25, 0.04);
+
+  // 捨てた側は敵が拾う
+  const s = skipEffect(skipped);
+  state.pendingMod.hpAdd += s.hpAdd;
+  state.pendingMod.countMul = Math.min(state.pendingMod.countMul * s.countMul, 3);
+  if (s.hpAdd > 0) addFloatText(W / 2, 90, "敵が +" + s.hpAdd + " を拾った!", "#ff9f43", 14);
+  if (s.countMul > 1) addFloatText(W / 2, 90, "敵が x" + s.countMul + " を拾った!", "#ff9f43", 16);
+
+  if (state.soldiers <= 0) gameOver();
+}
+
+// ---------- エフェクト ----------
+function addFloatText(x, y, text, color, size) {
+  state.floatTexts.push({ x, y, text, color, size, life: 1.3 });
+}
+function burst(x, y, color, n) {
+  for (let i = 0; i < n; i++) {
+    const a = Math.random() * Math.PI * 2, s = 40 + Math.random() * 140;
+    state.particles.push({ x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s, life: 0.5 + Math.random() * 0.4, color });
+  }
+}
+function addLightning(x1, y1, x2, y2) {
+  state.lightnings.push({ x1, y1, x2, y2, life: 0.18 });
+}
+
+// ---------- 撃破処理 (コンボ / オーバーキル連鎖) ----------
+function onKill(e, excess, chainDepth) {
+  state.kills++;
+  state.combo++;
+  state.maxCombo = Math.max(state.maxCombo, state.combo);
+  const pts = (e.boss ? 500 : 10 + level() * 2) * heatMul();
+  state.score += pts;
+
+  if (e.boss) {
+    state.bossAlive = false;
+    state.bossTimer = 40;
+    burst(e.x, e.y, "#ffb84d", 40);
+    addFloatText(e.x, e.y, "BOSS撃破! +" + Math.floor(pts), "#ffd866", 22);
+    addFloatText(e.x, e.y + 26, "報酬ゲート出現!", "#6bff9e", 15);
+    state.shake = 0.4;
+    state.freeze = Math.max(state.freeze, 0.12);
+    beep(300, 0.4, "sawtooth", 0.08);
+    chord([523, 659, 784], 0.5, 0.05);
+    // 確定で良ゲートペアをドロップ
+    spawnGatePair(true, Math.min(e.y, SQUAD_Y - 220));
+  } else {
+    burst(e.x, e.y, e.type === "eater" ? "#7bff9e" : "#ff7b7b", e.type === "tank" ? 18 : 10);
+    beep(Math.min(500 + state.combo * 8, 1600), 0.05, "triangle", 0.025);
+  }
+
+  // コンボ節目: ヒットストップ + 小シェイク
+  if (state.combo > 0 && state.combo % 25 === 0) {
+    state.freeze = Math.max(state.freeze, 0.08);
+    state.shake = Math.max(state.shake, 0.18);
+    addFloatText(state.squadX, SQUAD_Y - 100, state.combo + " COMBO!!", "#ffe066", 24);
+  }
+
+  // スプリッター分裂
+  if (e.type === "splitter") {
+    for (let i = 0; i < 2; i++) {
+      const c = makeEnemy("speeder", e.x + (i === 0 ? -14 : 14), e.y, 1);
+      c.hp = Math.ceil(e.maxHp * 0.3);
+      c.maxHp = c.hp;
+      c.r = 10;
+      state.enemies.push(c);
+    }
+  }
+
+  // オーバーキル連鎖: 超過ダメージが稲妻になって隣の敵へ跳ぶ
+  if (excess > 0 && chainDepth < 3) {
+    let nearest = null, nd = 150;
+    for (const o of state.enemies) {
+      if (o === e || o.hp <= 0) continue;
+      const d = Math.hypot(o.x - e.x, o.y - e.y);
+      if (d < nd) { nd = d; nearest = o; }
+    }
+    if (nearest) {
+      addLightning(e.x, e.y, nearest.x, nearest.y);
+      beep(1400 + chainDepth * 200, 0.06, "square", 0.03);
+      nearest.hp -= excess;
+      if (nearest.hp <= 0) onKill(nearest, -nearest.hp, chainDepth + 1);
+    }
+  }
+}
+
+// ---------- 更新 ----------
+function update(dt) {
+  if (state.freeze > 0) { state.freeze -= dt; return; } // ヒットストップ
+
+  state.time += dt;
+  // 敵の諜報は約15秒遅れる: x2直後の無双ウィンドウを保証する遅延追従
+  const pw = state.soldiers * (1 + state.rank * 0.1);
+  state.trackedPower += (pw - state.trackedPower) * Math.min(1, dt / 15);
+  state.score += dt * 2;
+  if (state.invuln > 0) state.invuln -= dt;
+  if (state.muzzle > 0) state.muzzle -= dt;
+  if (state.shotFlash > 0) state.shotFlash -= dt;
+
+  // PBスプリット (30秒毎に自己ベストと比較)
+  if (state.time >= state.nextSplitAt) {
+    const idx = state.splits.length;
+    state.splits.push(Math.floor(state.score));
+    const pb = meta.pbSplits[idx];
+    if (pb !== undefined) {
+      const diff = Math.floor(state.score) - pb;
+      addFloatText(W / 2, 150, "PB比 " + (diff >= 0 ? "+" : "") + diff + (diff >= 0 ? " 🔥" : ""),
+        diff >= 0 ? "#ffe066" : "#8aa3d0", 18);
+    }
+    if (debugHud) console.log("split", { t: Math.floor(state.time), score: Math.floor(state.score), soldiers: state.soldiers, enemyHp: enemyBaseHp() });
+    state.nextSplitAt += 30;
+  }
+
+  // 移動
+  if (keys["ArrowLeft"])  { state.targetX -= 380 * dt; clampTarget(); }
+  if (keys["ArrowRight"]) { state.targetX += 380 * dt; clampTarget(); }
+  state.squadX += (state.targetX - state.squadX) * Math.min(1, dt * 14);
+
+  // 射撃
+  state.fireTimer -= dt;
+  if (state.fireTimer <= 0) {
+    state.fireTimer = 0.16;
+    state.muzzle = 0.05;
+    const lanes = Math.min(Math.max(1, Math.floor(Math.sqrt(state.soldiers))), 12);
+    const dmg = Math.max(1, Math.round(state.soldiers / lanes / 3 * dmgMul()));
+    const spread = Math.min(lanes * 12, 110);
+    for (let i = 0; i < lanes; i++) {
+      const off = lanes === 1 ? 0 : (i / (lanes - 1) - 0.5) * spread;
+      state.bullets.push({ x: state.squadX + off, y: SQUAD_Y - 24, vy: -560, dmg });
+    }
+    beep(1100 + Math.min(state.soldiers, 400), 0.03, "square", 0.012);
+  }
+
+  // 弾
+  for (const b of state.bullets) b.y += b.vy * dt;
+  for (const b of state.eBullets) { b.x += b.vx * dt; b.y += b.vy * dt; }
+
+  // 敵弾が自軍にヒット
+  if (state.invuln <= 0) {
+    for (const b of state.eBullets) {
+      if (b.dead) continue;
+      if (b.y > SQUAD_Y - 22 && b.y < SQUAD_Y + 44 && Math.abs(b.x - state.squadX) < 64) {
+        b.dead = true;
+        burst(b.x, b.y, "#ff5555", 8);
+        // 割合ダメージ: 大軍でも被弾は痛い
+        loseSoldiers(Math.max(3, Math.ceil(state.soldiers * 0.06)), b.x, "被弾");
+        if (!state.running) return;
+      }
+    }
+  }
+
+  // 敵スポーン
+  state.spawnTimer -= dt;
+  if (state.spawnTimer <= 0) { state.spawnTimer = spawnInterval(); spawnWave(); }
+  if (!state.bossAlive) {
+    state.bossTimer -= dt;
+    if (state.bossTimer <= 0) spawnBoss();
+  }
+
+  // ゲートスポーン
+  state.gateTimer -= dt;
+  if (state.gateTimer <= 0) { state.gateTimer = 7.5; spawnGatePair(); }
+
+  // 敵更新
+  for (const e of state.enemies) {
+    if (e.hp <= 0) continue;
+
+    if (e.boss) {
+      // ボスは中段で足止め: ミニオン召喚 + 弾幕
+      if (e.y < 170) e.y += e.vy * dt;
+      else {
+        e.x += (state.squadX - e.x) * dt * 0.3;
+        e.minionTimer -= dt;
+        if (e.minionTimer <= 0) {
+          e.minionTimer = 2.2;
+          for (let i = 0; i < 2; i++) {
+            state.enemies.push(makeEnemy("minion", e.x + (i === 0 ? -30 : 30), e.y + 20, 1));
+          }
+          beep(240, 0.1, "sawtooth", 0.03);
+        }
+        e.volleyTimer -= dt;
+        if (e.volleyTimer <= 0) {
+          e.volleyTimer = Math.max(3.5 - level() * 0.06, 2.2);
+          const n = 5 + Math.min(Math.floor(level() / 3), 4);
+          for (let i = 0; i < n; i++) {
+            const ang = Math.PI * (0.3 + 0.4 * i / (n - 1));
+            const sp = 130 + level() * 3;
+            state.eBullets.push({ x: e.x, y: e.y + 20, vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp });
+          }
+          beep(180, 0.15, "square", 0.04);
+        }
+      }
+    } else if (e.eatState) {
+      // ゲートイーター: ゲートに取り付いて数値を食う
+      const gp = state.gates.find(g => !g.done);
+      if (gp) {
+        const side = (gp.left.kind === "add" ? gp.left.val : -999) >= (gp.right.kind === "add" ? gp.right.val : -999) ? gp.left : gp.right;
+        const tx = side.x + side.w / 2;
+        const ty = gp.y;
+        const dx = tx - e.x, dy = ty - e.y;
+        const d = Math.hypot(dx, dy);
+        if (d > 24) {
+          e.x += dx / d * 115 * dt;
+          e.y += dy / d * 115 * dt;
+          e.eatState = "seek";
+        } else {
+          e.eatState = "eat";
+          e.y = ty; // ゲートに張り付く
+          if (side.kind === "add") {
+            side.eaten = (side.eaten || 0) + 3 * dt;
+            if (side.eaten >= 1) {
+              side.val -= Math.floor(side.eaten);
+              side.eaten -= Math.floor(side.eaten);
+              side.val = Math.max(side.val, -40);
+            }
+          }
+        }
+      } else {
+        e.eatState = null; // ゲートがなくなったら普通に降下
+      }
+      if (!e.eatState || e.eatState === "seek") e.y += e.vy * 0.3 * dt;
+    } else if (e.type === "shooter") {
+      // シューター: 中段に陣取って自軍を狙撃する
+      if (e.y < e.stopY) e.y += e.vy * dt;
+      else {
+        e.wob += dt;
+        e.x += Math.sin(e.wob * 0.8) * 26 * dt;
+        e.shotTimer -= dt;
+        if (e.shotTimer <= 0) {
+          e.shotTimer = Math.max(2.4 - level() * 0.08, 1.3);
+          fireEnemyBullet(e.x, e.y + 10, state.squadX, SQUAD_Y, 165 + level() * 4);
+          e.flash = 0.12;
+          beep(330, 0.08, "square", 0.035);
+        }
+      }
+      if (e.flash > 0) e.flash -= dt;
+    } else if (e.type === "diver") {
+      // ダイバー: 一定高度で自軍にロックオンして急降下
+      if (!e.diving) {
+        e.wob += dt * 3;
+        e.x += Math.sin(e.wob) * 20 * dt;
+        e.y += e.vy * dt;
+        if (e.y >= e.diveAt) {
+          e.diving = true;
+          const d = Math.hypot(state.squadX - e.x, SQUAD_Y - e.y) || 1;
+          const sp = enemySpeed() * 3.2;
+          e.vx = (state.squadX - e.x) / d * sp;
+          e.vy = (SQUAD_Y - e.y) / d * sp;
+          addFloatText(e.x, e.y - 16, "!", "#ffae42", 18);
+          beep(880, 0.1, "sawtooth", 0.04);
+        }
+      } else {
+        e.x += e.vx * dt;
+        e.y += e.vy * dt;
+      }
+    } else {
+      e.wob += dt * 3;
+      e.x += (e.vx + Math.sin(e.wob) * (e.wobAmp || 14)) * dt;
+      e.y += e.vy * dt;
+    }
+    e.x = Math.max(e.r, Math.min(W - e.r, e.x));
+
+    // 弾ヒット
+    for (const b of state.bullets) {
+      if (b.dead || e.hp <= 0) continue;
+      if (Math.abs(b.x - e.x) < e.r + 4 && Math.abs(b.y - e.y) < e.r + 8) {
+        e.hp -= b.dmg;
+        b.dead = true;
+        if (e.hp <= 0) onKill(e, -e.hp, 0);
+      }
+    }
+
+    // 自軍と接触 → 兵が減る + コンボ途切れ
+    if (e.hp > 0 && !e.boss && state.invuln <= 0 &&
+        e.y > SQUAD_Y - 30 && Math.abs(e.x - state.squadX) < 70) {
+      // 接触ロスは敵HPと自軍規模の大きい方: 大軍でも接触は必ず痛い
+      const loss = Math.max(2, Math.ceil(e.hp / 1.5), Math.ceil(state.soldiers * 0.1));
+      e.hp = 0;
+      burst(e.x, SQUAD_Y - 20, "#ff5555", 16);
+      loseSoldiers(loss, e.x, "");
+      if (!state.running) return;
+    }
+  }
+
+  // ゲート更新
+  for (const gp of state.gates) {
+    gp.y += gp.vy * dt;
+
+    // ゲート撃ち込み: 青は成長(撃ちすぎるとx2に進化)、赤は除染
+    for (const side of [gp.left, gp.right]) {
+      if (side.kind !== "add") continue;
+      for (const b of state.bullets) {
+        if (b.dead) continue;
+        if (b.y < gp.y + 22 && b.y > gp.y - 22 && b.x > side.x && b.x < side.x + side.w) {
+          b.dead = true;
+          if (side.val < 0) {
+            // 除染は弾ダメージ比例: 負値は兵力スケールするので固定+1では形骸化する
+            side.val = Math.min(side.val + Math.max(1, Math.ceil(b.dmg * 0.5)), 1);
+          } else {
+            side.val += 1;
+          }
+          side.flash = 0.15;
+          if (side.val >= 0) {
+            side.hits = (side.hits || 0) + 1;
+            if (side.hits >= gp.evolveNeed && side.kind === "add") {
+              // x2 ゲートに進化
+              side.kind = "mul";
+              side.val = 2;
+              side.flash = 0.4;
+              addFloatText(side.x + side.w / 2, gp.y - 36, "進化! x2", "#ffe066", 18);
+              chord([784, 988], 0.3, 0.05);
+            }
+          }
+        }
+      }
+    }
+    if (gp.left.flash) gp.left.flash -= dt;
+    if (gp.right.flash) gp.right.flash -= dt;
+
+    // 通過判定
+    if (!gp.done && gp.y >= SQUAD_Y - 18) {
+      gp.done = true;
+      const chosen = state.squadX < W / 2 ? gp.left : gp.right;
+      const skipped = chosen === gp.left ? gp.right : gp.left;
+      applyGate(chosen, skipped);
+      if (!state.running) return;
+    }
+  }
+
+  // パーティクル / テキスト / 稲妻
+  for (const p of state.particles) {
+    p.x += p.vx * dt; p.y += p.vy * dt;
+    p.vy += 200 * dt;
+    p.life -= dt;
+  }
+  for (const t of state.floatTexts) { t.y -= 30 * dt; t.life -= dt; }
+  for (const l of state.lightnings) l.life -= dt;
+  if (state.shake > 0) state.shake -= dt;
+
+  // 掃除
+  state.bullets = state.bullets.filter(b => !b.dead && b.y > -20);
+  state.eBullets = state.eBullets.filter(b => !b.dead && b.y < H + 20 && b.y > -20 && b.x > -20 && b.x < W + 20);
+  state.enemies = state.enemies.filter(e => e.hp > 0 && e.y < H + 60);
+  state.gates = state.gates.filter(g => g.y < H + 50);
+  state.particles = state.particles.filter(p => p.life > 0);
+  state.floatTexts = state.floatTexts.filter(t => t.life > 0);
+  state.lightnings = state.lightnings.filter(l => l.life > 0);
+}
+
+// ---------- 描画: 兵士 ----------
+function drawSoldierSprite(x, y, color, dark, isLeader) {
+  // 脚
+  ctx.fillStyle = "#2c3550";
+  ctx.fillRect(x - 3.5, y + 3, 2.6, 4);
+  ctx.fillRect(x + 0.9, y + 3, 2.6, 4);
+  // 体 (鎧)
+  ctx.fillStyle = color;
+  ctx.fillRect(x - 4.5, y - 3, 9, 7);
+  // 銃 (上向き)
+  ctx.fillStyle = "#222b40";
+  ctx.fillRect(x + 3.2, y - 9, 2, 8);
+  // 頭
+  ctx.fillStyle = "#e8c39e";
+  ctx.beginPath();
+  ctx.arc(x - 0.5, y - 6, 3, 0, Math.PI * 2);
+  ctx.fill();
+  // ヘルメット
+  ctx.fillStyle = dark;
+  ctx.beginPath();
+  ctx.arc(x - 0.5, y - 6.6, 3.2, Math.PI, 0);
+  ctx.fill();
+  ctx.fillRect(x - 3.7, y - 6.8, 6.4, 1.4);
+  if (isLeader) {
+    // 隊長の旗飾り
+    ctx.fillStyle = "#ffe066";
+    ctx.fillRect(x - 1.2, y - 12, 1.2, 5);
+    ctx.beginPath();
+    ctx.moveTo(x, y - 12);
+    ctx.lineTo(x + 4, y - 10.7);
+    ctx.lineTo(x, y - 9.4);
+    ctx.closePath();
+    ctx.fill();
+  }
+}
+
+function drawSoldiers() {
+  const n = Math.min(state.soldiers, 50);
+  const cols = Math.min(Math.ceil(Math.sqrt(n) * 1.6), 12);
+  const ci = state.rank % RANK_COLORS.length;
+  const color = RANK_COLORS[ci], dark = RANK_DARK[ci];
+  const blink = state.invuln > 0 && Math.floor(state.time * 10) % 2 === 0;
+  ctx.globalAlpha = blink ? 0.4 : 1;
+  for (let i = n - 1; i >= 0; i--) {
+    const col = i % cols, row = Math.floor(i / cols);
+    const rowCount = Math.min(cols, n - row * cols);
+    const x = state.squadX + (col - (rowCount - 1) / 2) * 13;
+    const y = SQUAD_Y + row * 12;
+    drawSoldierSprite(x, y, color, dark, i === Math.floor(cols / 2));
+  }
+  ctx.globalAlpha = 1;
+  // マズルフラッシュ
+  if (state.muzzle > 0) {
+    const lanes = Math.min(Math.max(1, Math.floor(Math.sqrt(state.soldiers))), 12);
+    const spread = Math.min(lanes * 12, 110);
+    ctx.fillStyle = "rgba(255,230,120,.9)";
+    for (let i = 0; i < lanes; i++) {
+      const off = lanes === 1 ? 0 : (i / (lanes - 1) - 0.5) * spread;
+      ctx.beginPath();
+      ctx.arc(state.squadX + off, SQUAD_Y - 26, 2.5 + Math.random() * 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 18px sans-serif";
+  ctx.textAlign = "center";
+  const label = state.rank > 0
+    ? "★" + state.rank + " " + (state.soldiers % STAR_UNIT).toLocaleString()
+    : state.soldiers.toLocaleString();
+  ctx.fillText(label, state.squadX, SQUAD_Y - 16);
+}
+
+// ---------- 描画: 敵 ----------
+function drawEnemy(e) {
+  const x = e.x, y = e.y, r = e.r;
+  ctx.save();
+  ctx.translate(x, y);
+
+  if (e.boss) {
+    // ボス: 二重ボディ + 王冠 + 光る目
+    const pulse = 0.6 + Math.sin(state.time * 4) * 0.4;
+    ctx.fillStyle = "#7a2d12";
+    ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#ff9f43";
+    ctx.beginPath(); ctx.arc(0, 0, r * 0.78, 0, Math.PI * 2); ctx.fill();
+    // 王冠
+    ctx.fillStyle = "#ffe066";
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.6, -r * 0.75);
+    ctx.lineTo(-r * 0.6, -r * 1.15);
+    ctx.lineTo(-r * 0.3, -r * 0.9);
+    ctx.lineTo(0, -r * 1.25);
+    ctx.lineTo(r * 0.3, -r * 0.9);
+    ctx.lineTo(r * 0.6, -r * 1.15);
+    ctx.lineTo(r * 0.6, -r * 0.75);
+    ctx.closePath();
+    ctx.fill();
+    // 光る目
+    ctx.fillStyle = "rgba(255,40,40," + pulse + ")";
+    ctx.beginPath();
+    ctx.arc(-r * 0.32, -r * 0.1, r * 0.16, 0, Math.PI * 2);
+    ctx.arc(r * 0.32, -r * 0.1, r * 0.16, 0, Math.PI * 2);
+    ctx.fill();
+    // ギザギザの口
+    ctx.strokeStyle = "#5a1d08";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.45, r * 0.4);
+    for (let i = 0; i <= 6; i++) {
+      ctx.lineTo(-r * 0.45 + (r * 0.9 / 6) * i, r * 0.4 + (i % 2 ? 6 : 0));
+    }
+    ctx.stroke();
+  } else if (e.type === "speeder") {
+    // スピーダー: ダート型 + 翼
+    ctx.fillStyle = "#ffa3c2";
+    ctx.beginPath();
+    ctx.moveTo(0, r * 1.3);
+    ctx.lineTo(-r * 0.8, -r);
+    ctx.lineTo(0, -r * 0.5);
+    ctx.lineTo(r * 0.8, -r);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#d96a92";
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.8, -r * 0.2);
+    ctx.lineTo(-r * 1.5, -r * 0.9);
+    ctx.lineTo(-r * 0.5, -r * 0.55);
+    ctx.closePath();
+    ctx.moveTo(r * 0.8, -r * 0.2);
+    ctx.lineTo(r * 1.5, -r * 0.9);
+    ctx.lineTo(r * 0.5, -r * 0.55);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#5a1226";
+    ctx.beginPath();
+    ctx.arc(0, r * 0.1, r * 0.22, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (e.type === "tank") {
+    // タンク: 装甲プレート + リベット + バイザー
+    ctx.fillStyle = "#8a4a2e";
+    ctx.fillRect(-r, -r * 0.85, r * 2, r * 1.7);
+    ctx.fillStyle = "#c0573a";
+    ctx.fillRect(-r * 0.82, -r * 0.68, r * 1.64, r * 1.36);
+    ctx.strokeStyle = "#6e351c";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.82, 0); ctx.lineTo(r * 0.82, 0);
+    ctx.moveTo(0, -r * 0.68); ctx.lineTo(0, r * 0.68);
+    ctx.stroke();
+    ctx.fillStyle = "#4a2412";
+    for (const [rx, ry] of [[-0.65, -0.5], [0.65, -0.5], [-0.65, 0.5], [0.65, 0.5]]) {
+      ctx.beginPath(); ctx.arc(r * rx, r * ry, 2.4, 0, Math.PI * 2); ctx.fill();
+    }
+    // バイザー (目)
+    ctx.fillStyle = "#ffd24d";
+    ctx.fillRect(-r * 0.45, -r * 0.32, r * 0.9, r * 0.2);
+  } else if (e.type === "splitter") {
+    // スプリッター: 細胞型 (核が2つ見えている)
+    ctx.fillStyle = "rgba(184,123,255,.45)";
+    ctx.beginPath(); ctx.arc(0, 0, r, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = "#b87bff";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    const sep = r * 0.4 + Math.sin(state.time * 5 + e.wob) * 2;
+    ctx.fillStyle = "#8a4fd0";
+    ctx.beginPath(); ctx.arc(-sep, 0, r * 0.4, 0, Math.PI * 2); ctx.fill();
+    ctx.beginPath(); ctx.arc(sep, 0, r * 0.4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#fff";
+    ctx.beginPath();
+    ctx.arc(-sep - 2, -2, 1.6, 0, Math.PI * 2);
+    ctx.arc(sep - 2, -2, 1.6, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (e.type === "eater") {
+    // イーター: 大口 + 牙 (もぐもぐアニメ)
+    const jaw = e.eatState === "eat" ? (Math.sin(state.time * 10) * 0.25 + 0.45) : 0.3;
+    ctx.fillStyle = "#5ddb7f";
+    ctx.beginPath();
+    ctx.arc(0, 0, r, Math.PI * jaw, Math.PI * (2 - jaw));
+    ctx.lineTo(0, 0);
+    ctx.closePath();
+    ctx.fill();
+    // 牙
+    ctx.fillStyle = "#fff";
+    ctx.beginPath();
+    ctx.moveTo(r * 0.5, -r * 0.45);
+    ctx.lineTo(r * 0.66, -r * 0.1);
+    ctx.lineTo(r * 0.34, -r * 0.18);
+    ctx.closePath();
+    ctx.moveTo(r * 0.5, r * 0.45);
+    ctx.lineTo(r * 0.66, r * 0.1);
+    ctx.lineTo(r * 0.34, r * 0.18);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#1c5e31";
+    ctx.beginPath();
+    ctx.arc(-r * 0.25, -r * 0.45, r * 0.16, 0, Math.PI * 2);
+    ctx.fill();
+    if (e.eatState === "eat") {
+      ctx.fillStyle = "#5ddb7f";
+      ctx.font = "10px sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("もぐもぐ", 0, -r - 14);
+    }
+  } else if (e.type === "shooter") {
+    // シューター: 砲塔 (下向き砲身)
+    ctx.fillStyle = "#5a6a8a";
+    ctx.beginPath();
+    ctx.arc(0, 0, r, Math.PI, 0);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#76879f";
+    ctx.beginPath();
+    ctx.arc(0, -r * 0.15, r * 0.6, Math.PI, 0);
+    ctx.closePath();
+    ctx.fill();
+    // 砲身 (自軍を狙う)
+    const ang = Math.atan2(SQUAD_Y - y, state.squadX - x);
+    ctx.save();
+    ctx.rotate(ang);
+    ctx.fillStyle = e.flash > 0 ? "#ffd24d" : "#2e3a52";
+    ctx.fillRect(0, -3, r * 1.3, 6);
+    ctx.restore();
+    // 照準アイ
+    ctx.fillStyle = e.flash > 0 ? "#ff4444" : "#ffd24d";
+    ctx.beginPath();
+    ctx.arc(0, -r * 0.2, r * 0.18, 0, Math.PI * 2);
+    ctx.fill();
+  } else if (e.type === "diver") {
+    // ダイバー: ミサイル型 (降下方向を向く)
+    const ang = e.diving ? Math.atan2(e.vy, e.vx) : Math.PI / 2;
+    ctx.rotate(ang - Math.PI / 2);
+    ctx.fillStyle = "#ff8c42";
+    ctx.beginPath();
+    ctx.moveTo(0, r * 1.4);
+    ctx.lineTo(-r * 0.6, -r * 0.6);
+    ctx.lineTo(r * 0.6, -r * 0.6);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = "#c75f1e";
+    ctx.fillRect(-r * 0.6, -r * 0.9, r * 0.34, r * 0.5);
+    ctx.fillRect(r * 0.26, -r * 0.9, r * 0.34, r * 0.5);
+    // 炎
+    if (e.diving) {
+      ctx.fillStyle = "rgba(255,210,80," + (0.5 + Math.random() * 0.5) + ")";
+      ctx.beginPath();
+      ctx.moveTo(-r * 0.3, -r * 0.9);
+      ctx.lineTo(0, -r * (1.4 + Math.random() * 0.5));
+      ctx.lineTo(r * 0.3, -r * 0.9);
+      ctx.closePath();
+      ctx.fill();
+    }
+    ctx.fillStyle = "#5a2505";
+    ctx.beginPath();
+    ctx.arc(0, r * 0.45, r * 0.2, 0, Math.PI * 2);
+    ctx.fill();
+  } else {
+    // ノーマル / ミニオン: 角つきブロブ
+    const col = e.type === "minion" ? "#ff8f8f" : "#ff6b6b";
+    const dark = e.type === "minion" ? "#b35454" : "#a83232";
+    // 角
+    ctx.fillStyle = dark;
+    ctx.beginPath();
+    ctx.moveTo(-r * 0.5, -r * 0.6);
+    ctx.lineTo(-r * 0.85, -r * 1.25);
+    ctx.lineTo(-r * 0.15, -r * 0.85);
+    ctx.closePath();
+    ctx.moveTo(r * 0.5, -r * 0.6);
+    ctx.lineTo(r * 0.85, -r * 1.25);
+    ctx.lineTo(r * 0.15, -r * 0.85);
+    ctx.closePath();
+    ctx.fill();
+    // 体
+    ctx.fillStyle = col;
+    ctx.beginPath();
+    ctx.arc(0, 0, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = dark;
+    ctx.beginPath();
+    ctx.arc(0, r * 0.35, r * 0.75, 0, Math.PI);
+    ctx.fill();
+    // 目 (白目 + 瞳)
+    ctx.fillStyle = "#fff";
+    ctx.beginPath();
+    ctx.arc(-r * 0.34, -r * 0.15, r * 0.26, 0, Math.PI * 2);
+    ctx.arc(r * 0.34, -r * 0.15, r * 0.26, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = "#2a0808";
+    const look = Math.max(-1, Math.min(1, (state.squadX - x) / 200)) * r * 0.1;
+    ctx.beginPath();
+    ctx.arc(-r * 0.34 + look, -r * 0.1, r * 0.12, 0, Math.PI * 2);
+    ctx.arc(r * 0.34 + look, -r * 0.1, r * 0.12, 0, Math.PI * 2);
+    ctx.fill();
+    // ギザ歯
+    ctx.fillStyle = "#fff";
+    for (let i = -1; i <= 1; i++) {
+      ctx.beginPath();
+      ctx.moveTo(i * r * 0.3 - 3, r * 0.42);
+      ctx.lineTo(i * r * 0.3, r * 0.65);
+      ctx.lineTo(i * r * 0.3 + 3, r * 0.42);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+  ctx.restore();
+
+  // HPバー + 数値
+  const bw = r * 2;
+  ctx.fillStyle = "rgba(0,0,0,.5)";
+  ctx.fillRect(x - bw / 2, y - r - 12, bw, 4);
+  ctx.fillStyle = "#6bff9e";
+  ctx.fillRect(x - bw / 2, y - r - 12, bw * Math.max(0, e.hp / e.maxHp), 4);
+  ctx.fillStyle = "#fff";
+  ctx.font = (e.boss ? "bold 16px" : "11px") + " sans-serif";
+  ctx.textAlign = "center";
+  ctx.strokeStyle = "rgba(0,0,0,.6)";
+  ctx.lineWidth = 3;
+  const hpLabel = e.hp >= 10000 ? Math.round(e.hp / 1000) + "k" : "" + Math.ceil(e.hp);
+  ctx.strokeText(hpLabel, x, y + 4);
+  ctx.fillText(hpLabel, x, y + 4);
+}
+
+// ---------- 描画: ゲート ----------
+function drawGatePair(gp) {
+  for (const side of [gp.left, gp.right]) {
+    const good = gateIsGood(side);
+    const flash = side.flash > 0;
+    ctx.fillStyle = flash ? "rgba(255,255,255,.85)"
+      : good ? "rgba(70,130,255,.65)" : "rgba(255,70,70,.6)";
+    ctx.strokeStyle = good ? "#9cc4ff" : "#ffb0b0";
+    ctx.lineWidth = 2;
+    ctx.fillRect(side.x, gp.y - 20, side.w, 40);
+    ctx.strokeRect(side.x, gp.y - 20, side.w, 40);
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 24px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(gateLabel(side), side.x + side.w / 2, gp.y + 9);
+
+    // 即死予告: このゲートを今くぐると全滅する場合は骸骨を出す
+    if (!gp.done && state.soldiers > 0 && gateResult(side, state.soldiers) <= 0) {
+      ctx.font = "16px sans-serif";
+      ctx.fillText("💀", side.x + side.w / 2 + 44, gp.y + 8);
+    }
+
+    // 進化プログレスバー (青addゲート)
+    if (side.kind === "add" && side.val >= 0) {
+      const prog = Math.min((side.hits || 0) / gp.evolveNeed, 1);
+      ctx.fillStyle = "rgba(0,0,0,.4)";
+      ctx.fillRect(side.x + 8, gp.y + 13, side.w - 16, 4);
+      ctx.fillStyle = "#ffe066";
+      ctx.fillRect(side.x + 8, gp.y + 13, (side.w - 16) * prog, 4);
+      ctx.font = "10px sans-serif";
+      ctx.fillStyle = "rgba(255,255,255,.75)";
+      ctx.fillText("撃つと成長 / あと" + Math.max(0, gp.evolveNeed - (side.hits || 0)) + "発でx2進化", side.x + side.w / 2, gp.y - 26);
+    } else if (side.kind === "add" && side.val < 0) {
+      ctx.font = "10px sans-serif";
+      ctx.fillStyle = "rgba(255,255,255,.75)";
+      ctx.fillText("撃って除染できる!", side.x + side.w / 2, gp.y - 26);
+    }
+
+    // 捨てたら敵が拾う予告
+    ctx.font = "10px sans-serif";
+    ctx.fillStyle = "#ff9f43";
+    ctx.fillText(skipLabel(side), side.x + side.w / 2, gp.y + 34);
+  }
+  ctx.fillStyle = "#46587a";
+  ctx.fillRect(W / 2 - 4, gp.y - 24, 8, 48);
+}
+
+const HEAT_BULLET = ["#ffe98a", "#ffc966", "#ff9d4d", "#ff7038", "#ff4828"];
+
+function draw() {
+  ctx.save();
+  if (state.shake > 0) {
+    ctx.translate((Math.random() - 0.5) * 8 * state.shake * 4, (Math.random() - 0.5) * 8 * state.shake * 4);
+  }
+  ctx.clearRect(-10, -10, W + 20, H + 20);
+
+  ctx.fillStyle = "rgba(255,255,255,.35)";
+  for (let i = 0; i < 40; i++) {
+    const sx = (i * 137) % W;
+    const sy = ((i * 211) + state.time * (20 + i % 3 * 14)) % H;
+    ctx.fillRect(sx, sy, 2, 2);
+  }
+
+  for (const gp of state.gates) drawGatePair(gp);
+
+  // 自軍の弾 (ヒートで色とトレイルが変化)
+  const tier = heatTier();
+  ctx.fillStyle = HEAT_BULLET[tier];
+  const tail = 12 + tier * 5;
+  for (const b of state.bullets) ctx.fillRect(b.x - 2, b.y - tail + 4, 4, tail);
+
+  // 敵の弾 (赤い光球)
+  for (const b of state.eBullets) {
+    ctx.fillStyle = "rgba(255,80,80,.35)";
+    ctx.beginPath(); ctx.arc(b.x, b.y, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#ff5050";
+    ctx.beginPath(); ctx.arc(b.x, b.y, 4, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = "#ffd0d0";
+    ctx.beginPath(); ctx.arc(b.x - 1, b.y - 1, 1.6, 0, Math.PI * 2); ctx.fill();
+  }
+
+  for (const e of state.enemies) drawEnemy(e);
+
+  // 稲妻 (オーバーキル連鎖)
+  for (const l of state.lightnings) {
+    ctx.globalAlpha = Math.max(0, l.life / 0.18);
+    ctx.strokeStyle = "#aee3ff";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(l.x1, l.y1);
+    const mx = (l.x1 + l.x2) / 2 + (Math.random() - 0.5) * 18;
+    const my = (l.y1 + l.y2) / 2 + (Math.random() - 0.5) * 18;
+    ctx.lineTo(mx, my);
+    ctx.lineTo(l.x2, l.y2);
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  drawSoldiers();
+
+  for (const p of state.particles) {
+    ctx.globalAlpha = Math.max(0, p.life);
+    ctx.fillStyle = p.color;
+    ctx.fillRect(p.x - 2, p.y - 2, 4, 4);
+  }
+  ctx.globalAlpha = 1;
+
+  for (const t of state.floatTexts) {
+    ctx.globalAlpha = Math.min(1, t.life);
+    ctx.fillStyle = t.color;
+    ctx.font = "bold " + t.size + "px sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(t.text, t.x, t.y);
+  }
+  ctx.globalAlpha = 1;
+
+  // HUD
+  ctx.fillStyle = "#fff";
+  ctx.font = "bold 16px sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText("SCORE " + Math.floor(state.score), 12, 26);
+  ctx.textAlign = "right";
+  ctx.fillText("WAVE " + level(), W - 12, 26);
+  ctx.textAlign = "left";
+  ctx.fillStyle = "#9db4e0";
+  ctx.font = "12px sans-serif";
+  ctx.fillText("撃破 " + state.kills + "  /  " + Math.floor(state.time) + "s", 12, 46);
+
+  // コンボ表示
+  if (state.combo >= 5) {
+    ctx.fillStyle = HEAT_BULLET[tier];
+    ctx.font = "bold " + (16 + tier * 2) + "px sans-serif";
+    ctx.fillText(state.combo + " COMBO  x" + heatMul().toFixed(1), 12, 70);
+  }
+
+  // 次ウェーブへの敵強化警告
+  const mod = state.pendingMod;
+  if (mod.hpAdd > 0 || mod.countMul > 1) {
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ff9f43";
+    ctx.font = "bold 13px sans-serif";
+    let warn = "⚠ 次の敵";
+    if (mod.countMul > 1) warn += " x" + mod.countMul;
+    if (mod.hpAdd > 0) warn += " HP+" + mod.hpAdd;
+    ctx.fillText(warn, W / 2, 46);
+  }
+
+  // スクリーンショット時の白フラッシュ
+  if (state.shotFlash > 0) {
+    ctx.fillStyle = "rgba(255,255,255," + Math.min(1, state.shotFlash * 6) + ")";
+    ctx.fillRect(-10, -10, W + 20, H + 20);
+  }
+
+  // F3バランス計測HUD (開発用)
+  if (debugHud && state.running) {
+    const lanes = Math.min(Math.max(1, Math.floor(Math.sqrt(state.soldiers))), 12);
+    const dmg = Math.max(1, Math.round(state.soldiers / lanes / 3 * dmgMul()));
+    const dps = Math.round(dmg * lanes / 0.16);
+    const hp = enemyBaseHp();
+    const pw = state.soldiers * (1 + state.rank * 0.1);
+    ctx.fillStyle = "rgba(0,0,0,.55)";
+    ctx.fillRect(W - 178, 56, 170, 92);
+    ctx.fillStyle = "#9fe8ff";
+    ctx.font = "11px monospace";
+    ctx.textAlign = "left";
+    const rows = [
+      "DPS   " + dps,
+      "敵HP  " + hp + " (TTK " + (hp / Math.max(1, dps)).toFixed(2) + "s)",
+      "power " + Math.round(pw),
+      "追従  " + Math.round(state.trackedPower),
+      "湧き  " + spawnInterval().toFixed(2) + "s x" + Math.min(swarmFactor(), 2).toFixed(2),
+    ];
+    rows.forEach((r, i) => ctx.fillText(r, W - 170, 74 + i * 16));
+  }
+
+  ctx.restore();
+}
+
+// ---------- ループ ----------
+let last = 0;
+function loop(ts) {
+  if (!state || !state.running) return;
+  const dt = Math.min((ts - last) / 1000, 0.05);
+  last = ts;
+  update(dt);
+  if (state.running) {
+    draw();
+    requestAnimationFrame(loop);
+  }
+}
+
+function gameOver() {
+  state.running = false;
+  if (document.pointerLockElement) document.exitPointerLock();
+
+  // 勲章獲得 + 自己ベスト更新
+  const gained = Math.floor(state.score / 250 * (1 + 0.2 * meta.upMedal));
+  meta.medals += gained;
+  let newPB = false;
+  if (state.score > meta.bestScore) {
+    meta.bestScore = state.score;
+    meta.pbSplits = state.splits;
+    newPB = true;
+  }
+  saveMeta();
+
+  resultLine.style.display = "block";
+  resultLine.innerHTML =
+    "SCORE: " + Math.floor(state.score) + (newPB ? " <span style='color:#ffe066'>★自己ベスト!</span>" : "") +
+    "<br>撃破 " + state.kills + " / 最大コンボ " + state.maxCombo +
+    " / 最大兵数 " + state.bestSoldiers.toLocaleString() + " / ★" + state.rank +
+    "<br>🎖 勲章 +" + gained;
+  titleEl.textContent = "GAME OVER";
+  startBtn.textContent = "もう一度";
+  document.getElementById("howto").style.display = "none";
+  renderShop();
+  overlay.classList.remove("hidden");
+  beep(90, 0.6, "sawtooth", 0.08);
+}
+
+startBtn.addEventListener("click", () => {
+  if (!audioCtx) {
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
+  }
+  state = newState();
+  state.running = true;
+  overlay.classList.add("hidden");
+  requestLock();
+  last = performance.now();
+  requestAnimationFrame(loop);
+});
+
+renderShop();
+</script>
+</body>
+</html>
