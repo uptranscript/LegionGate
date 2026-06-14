@@ -33,15 +33,20 @@ if (process.env.SIM_SKILLS) {
 }
 
 // ---- local mirror of the game's gate semantics --------------------------
-// gateResult: add -> n+val, mul -> n*val, div -> floor(n/val)
+// Special gates leave soldiers unchanged but grant a buff/effect; they are "good".
+const SPECIAL = new Set(["rapid", "spread", "shield", "bomb", "elite"]);
+const SOFT_CAP = 3000; // mirror of game TUNE.softCap (x2 damps to linear above this)
 function gateResult(side, n) {
   if (side.kind === "add") return n + side.val;
-  if (side.kind === "mul") return n * side.val;
-  return Math.floor(n / side.val); // div
+  if (side.kind === "mul") {
+    if (n < SOFT_CAP) return n * side.val;
+    return n + Math.ceil((side.val - 1) * (SOFT_CAP * 0.5 + 1200)); // approx of level-scaled add
+  }
+  if (side.kind === "div") return Math.floor(n / side.val);
+  return n; // special: soldiers unchanged
 }
-// gateIsGood: (add && val>=0) || mul
 function gateIsGood(side) {
-  return (side.kind === "add" && side.val >= 0) || side.kind === "mul";
+  return SPECIAL.has(side.kind) || (side.kind === "add" && side.val >= 0) || side.kind === "mul";
 }
 
 // Deterministic PRNG so each (skill, seed) plays identically across runs.
@@ -83,68 +88,48 @@ function makeBot(skillName, seed) {
     return id;
   }
 
-  // Utility for a side, used both to pick AND to score "regret" of discarding.
-  // Returns -Infinity-ish for instant-death sides so they are avoided when the
-  // other side survives.
-  function sideValue(side, n) {
-    return gateResult(side, n);
+  // Score a cell for selection. Higher = better. Instant-death cells return null.
+  // Specials are valued as a light multiplicative gain (you don't lose tempo and
+  // gain a buff); traps that survive (÷2, small positive that's worse) are docked.
+  function cellScore(c, n) {
+    if (SPECIAL.has(c.kind)) return n * 1.12;
+    const res = gateResult(c, n);
+    if (res <= 0) return null;                 // wipes us -> never choose
+    return gateIsGood(c) ? res : res * 0.6;    // trap-but-survivable: docked
   }
 
-  // Cost of discarding `side`: the enemy pickup it triggers (skipped mul ->
-  // next wave count x2..3, skipped positive add -> wave HP+). That pain scales
-  // with how big our army (and thus the matched enemy wave) currently is, NOT
-  // with the gate's face value — a flat constant makes tiny armies wrongly
-  // prefer x2 over a far larger +N.
-  function discardLoss(side, n) {
-    if (side.kind === "mul") return 5 + 0.15 * n;
-    if (side.kind === "add" && side.val > 0) return 0.3 * side.val;
-    return 0; // trap side: no penalty (matches game design)
-  }
-
-  // Choose the best gate pair to commit to: nearest un-done pair above the
-  // squad line. Returns { gp, side } or null.
+  // Choose the best gate to commit to: among the cells of the nearest un-done
+  // pair, pick the highest-scoring (with a per-pair mistake chance to take a
+  // worse-but-survivable cell). Returns { gp, cell, cidx } or null.
   function chooseGate(state) {
     let best = null, bestDy = Infinity;
     for (const gp of state.gates) {
       if (gp.done) continue;
-      if (gp.y >= SQUAD_Y) continue; // already at/past the squad
+      if (gp.y >= SQUAD_Y) continue;
       const dy = SQUAD_Y - gp.y;
       if (dy < bestDy) { bestDy = dy; best = gp; }
     }
     if (!best) return null;
 
     const n = state.soldiers;
-    const L = best.left, R = best.right;
-    const lv = sideValue(L, n), rv = sideValue(R, n);
-
-    // Death avoidance: if one side wipes us (<=0) and the other survives,
-    // forcibly exclude the lethal side.
-    const lDead = lv <= 0, rDead = rv <= 0;
-    let preferLeft;
-    if (lDead && !rDead) preferLeft = false;       // left wipes us -> pick right
-    else if (rDead && !lDead) preferLeft = true;   // right wipes us -> pick left
-    else {
-      // Net merit = resulting soldiers minus the regret of discarding the other.
-      const leftMerit = lv - discardLoss(R, n);
-      const rightMerit = rv - discardLoss(L, n);
-      preferLeft = leftMerit >= rightMerit;
+    const cells = best.cells;
+    let bestI = -1, bestS = -Infinity, worstI = -1, worstS = Infinity;
+    for (let i = 0; i < cells.length; i++) {
+      const s = cellScore(cells[i], n);
+      if (s === null) continue;
+      if (s > bestS) { bestS = s; bestI = i; }
+      if (s < worstS) { worstS = s; worstI = i; }
     }
+    if (bestI < 0) bestI = 0; // all cells lethal (shouldn't happen: >=1 good guaranteed)
 
-    // Mistake: per pair, at most once, flip to the strictly worse side.
     const pid = pairIdOf(best);
-    if (!pairMistake.has(pid)) {
-      pairMistake.set(pid, rng() < cfg.mistake);
+    if (!pairMistake.has(pid)) pairMistake.set(pid, rng() < cfg.mistake);
+    let cidx = bestI;
+    // Mistake: take a worse (but survivable) cell when the call is close-ish.
+    if (pairMistake.get(pid) && worstI >= 0 && worstI !== bestI && worstS >= bestS * 0.4) {
+      cidx = worstI;
     }
-    if (pairMistake.get(pid) && !(lDead && !rDead) && !(rDead && !lDead)) {
-      // Only flip when there is a genuinely worse-but-survivable side, and the
-      // call is actually close (>=40% of the better side). Weak humans misjudge
-      // near-ties; they do not walk into obvious x2-vs-÷2 catastrophes.
-      const worseIsLeft = lv < rv;
-      const worseVal = Math.min(lv, rv), betterVal = Math.max(lv, rv);
-      if (worseVal > 0 && lv !== rv && worseVal >= betterVal * 0.4) preferLeft = worseIsLeft;
-    }
-
-    return { gp: best, side: preferLeft ? L : R, preferLeft };
+    return { gp: best, cell: cells[cidx], cidx };
   }
 
   // Build the list of threats (x position, weight) that can hit the squad line.
@@ -273,33 +258,27 @@ function makeBot(skillName, seed) {
     }
 
     if (sel) {
-      const side = sel.side;
-      const center = side.x + side.w / 2; // left -> 125, right -> 355
+      const c = sel.cell;
+      const lo = c.x + 6, hi = c.x + c.w - 6;
+      const center = c.x + c.w / 2;
       target = center;
 
       if (sel.gp.y > SQUAD_Y - 260) {
-        // Committed window: constrain to the chosen side's half and pull hard so
-        // we actually arrive on the right half before the gate resolves.
-        band = sel.preferLeft ? [LEFT_MIN, LEFT_MAX] : [RIGHT_MIN, RIGHT_MAX];
+        // Committed window: constrain to the chosen cell's column and pull hard
+        // so we actually arrive over it before the gate resolves.
+        band = [lo, hi];
         pull = 0.05;
       } else {
         // Gate still far: farm enemies (aim layer dominates) — camping under a
-        // distant gate both wastes the bullet column and halves bullet damage
-        // through the gate band. The commit window handles arrival later.
+        // distant gate wastes the bullet column and halves bullet damage through
+        // the gate band. The commit window handles arrival later.
         pull = 0.005;
       }
 
-      // Final approach: hard lock to the side (cross no matter what).
+      // Final approach: hard lock over the chosen cell (cross no matter what).
       if (sel.gp.y > SQUAD_Y - 80) {
         hardLock = true;
-        target = sel.preferLeft
-          ? Math.min(center, LEFT_MAX)
-          : Math.max(center, RIGHT_MIN);
-      }
-
-      // Decontam: a negative-add chosen side wants our bullets under it.
-      if (side.kind === "add" && side.val < 0) {
-        target = Math.max(band[0], Math.min(band[1], center));
+        target = Math.max(lo, Math.min(hi, center));
       }
     } else {
       target = 240; // no live pair: idle near center, survival-first

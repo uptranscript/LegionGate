@@ -93,7 +93,7 @@ function runOne(skill, seed, cfg) {
       maxSoldiers: 0, score: 0, rank: 0, kills: 0,
       aliveAtCap: false, scoreCapped: false, nan: false,
       deathPhase: "error", lastEvents: [],
-      trapPairs: 0, decontamEvents: 0,
+      allTrapPairs: 0, decontamEvents: 0, evolveEvents: 0, specialEvents: 0, medianLifespan: 0, maxOnScreen: 0, pctPressure: 0, soldierLossTotal: 0,
     };
   }
 
@@ -114,36 +114,57 @@ function runOne(skill, seed, cfg) {
   let scoreCapped = false;
   let reachedHard = false;
 
-  // sanity trackers (per-run; aggregated by master)
-  let trapPairs = 0;
+  // sanity + threat-feel trackers (per-run; aggregated by master)
+  const SQUAD_Y = sim.consts.SQUAD_Y;
+  let allTrapPairs = 0;   // gate pairs where EVERY cell is a trap (spec: must never happen)
   let decontamEvents = 0;
-  const seenPairs = new WeakSet();      // gate pairs already inspected for trap-violation
-  const negDecontam = new WeakSet();    // gate sides already counted as decontaminated
+  let maxOnScreen = 0;
+  let pressureTicks = 0;  // ticks with >=1 live enemy near the squad line
+  let tickCount = 0;
+  let soldierLossTotal = 0;
+  const seenPairs = new WeakSet();      // gate pairs already inspected
+  const negDecontam = new WeakSet();    // gate cells already counted as decontaminated
+  // enemy lifespan ("felt strength": one-shot enemies die at ~dt; tanky ones live longer)
+  const enemyFirst = new Map();         // enemy obj -> first time seen
+  const lifespans = [];
+  let prevSoldiers = state.soldiers;
 
   const maxTicks = Math.ceil(cap / dt) + 4;
   let running = true;
 
   for (let t = 0; t < maxTicks; t++) {
-    // --- pre-tick sanity scan on the CURRENT gate set ---
+    tickCount++;
+    // --- gate sanity scan ---
     for (const gp of state.gates) {
+      const cells = gp.cells || [];
       if (!seenPairs.has(gp)) {
         seenPairs.add(gp);
-        // same-kind double-trap pair = spec violation to flag.
-        const L = gp.left, R = gp.right;
-        const lGood = (L.kind === "add" && L.val >= 0) || L.kind === "mul";
-        const rGood = (R.kind === "add" && R.val >= 0) || R.kind === "mul";
-        if (!lGood && !rGood && L.kind === R.kind) trapPairs++;
+        if (cells.length && cells.every(c => !((c.kind === "add" && c.val >= 0) || c.kind === "mul" ||
+            ["rapid", "spread", "shield", "bomb", "elite"].includes(c.kind)))) allTrapPairs++;
       }
-      // negative add side that climbs back to >= 0 = a decontam event (once/side).
-      for (const side of [gp.left, gp.right]) {
-        if (side.kind === "add" && side.val < 0) {
-          side.__wasNeg = true;
-        } else if (side.kind === "add" && side.val >= 0 && side.__wasNeg && !negDecontam.has(side)) {
-          negDecontam.add(side);
-          decontamEvents++;
+      for (const c of cells) {
+        if (c.kind === "add" && c.val < 0) c.__wasNeg = true;
+        else if (c.kind === "add" && c.val >= 0 && c.__wasNeg && !negDecontam.has(c)) {
+          negDecontam.add(c); decontamEvents++;
         }
       }
     }
+
+    // --- threat-feel telemetry on the live enemy set ---
+    const now = state.time;
+    let live = 0, pressure = false;
+    const present = new Set();
+    for (const e of state.enemies) {
+      if (e.hp <= 0) continue;
+      live++; present.add(e);
+      if (!enemyFirst.has(e)) enemyFirst.set(e, now);
+      if (!e.boss && e.y > SQUAD_Y - 130 && e.y < SQUAD_Y + 40) pressure = true;
+    }
+    for (const [e, t0] of enemyFirst) {
+      if (!present.has(e)) { lifespans.push(now - t0); enemyFirst.delete(e); }
+    }
+    if (live > maxOnScreen) maxOnScreen = live;
+    if (pressure) pressureTicks++;
 
     if (reachedHard === false && state.time >= hardStartSec) reachedHard = true;
 
@@ -158,6 +179,8 @@ function runOne(skill, seed, cfg) {
 
     if (!Number.isFinite(state.soldiers)) { nan = true; break; }
     if (state.soldiers > maxSoldiers) maxSoldiers = state.soldiers;
+    if (state.soldiers < prevSoldiers) soldierLossTotal += prevSoldiers - state.soldiers;
+    prevSoldiers = state.soldiers;
 
     if (!running) break; // death
   }
@@ -168,6 +191,14 @@ function runOne(skill, seed, cfg) {
   const survivalSec = Math.min(state.time, cap);
   const afterHardSec = reachedHard ? Math.max(0, survivalSec - hardStartSec) : 0;
   const lastEvents = events.slice(-5).map(e => ({ time: Math.round(e.time * 10) / 10, text: e.text }));
+
+  // event-derived counters (verify evolution is reachable + specials fire)
+  let evolveEvents = 0, specialEvents = 0;
+  const SPECIAL_RE = /連射強化|拡散弾|シールド|精鋭化|殲滅/;
+  for (const e of events) {
+    if (e.text.indexOf("進化") >= 0) evolveEvents++;
+    else if (SPECIAL_RE.test(e.text)) specialEvents++;
+  }
 
   let deathPhase;
   if (nan) deathPhase = "nan";
@@ -189,8 +220,14 @@ function runOne(skill, seed, cfg) {
     nan,
     deathPhase,
     lastEvents,
-    trapPairs,
+    allTrapPairs,
     decontamEvents,
+    evolveEvents,
+    specialEvents,
+    medianLifespan: Math.round(median(lifespans) * 1000) / 1000,
+    maxOnScreen,
+    pctPressure: tickCount ? Math.round(pressureTicks / tickCount * 1000) / 1000 : 0,
+    soldierLossTotal,
   };
 }
 
@@ -233,14 +270,22 @@ function aggregate(records, cfg, HARD, hardStartSec) {
       medianScore: median(rs.map(r => r.score)),
       deathsPreHard: rs.filter(r => !r.reachedHard && !r.nan && !r.error && !r.aliveAtCap && !r.scoreCapped).length,
       deathsInHard: rs.filter(r => r.reachedHard && !r.aliveAtCap && !r.scoreCapped && !r.nan && !r.error).length,
+      // threat-feel: are enemies actually surviving bullets, and is the field pressured?
+      medianEnemyLifespan: Math.round(median(rs.map(r => r.medianLifespan || 0)) * 1000) / 1000,
+      medianMaxOnScreen: median(rs.map(r => r.maxOnScreen || 0)),
+      medianPctPressure: Math.round(median(rs.map(r => r.pctPressure || 0)) * 1000) / 1000,
+      medianEvolveEvents: median(rs.map(r => r.evolveEvents || 0)),
+      medianSpecialEvents: median(rs.map(r => r.specialEvents || 0)),
     };
   }
 
   const sanity = {
-    trapPairs: records.reduce((a, r) => a + (r.trapPairs || 0), 0),
+    allTrapPairs: records.reduce((a, r) => a + (r.allTrapPairs || 0), 0), // 全cell罠 (0であるべき)
     nanRuns: records.filter(r => r.nan).length,
     errorRuns: records.filter(r => r.error).length,
     decontamEvents: records.reduce((a, r) => a + (r.decontamEvents || 0), 0),
+    evolveEvents: records.reduce((a, r) => a + (r.evolveEvents || 0), 0),    // x2進化総数 (>0であるべき)
+    specialEvents: records.reduce((a, r) => a + (r.specialEvents || 0), 0),  // 特殊ゲート発動総数
   };
 
   return {
@@ -273,7 +318,7 @@ function runAsWorker() {
           skill: job.skill, seed: job.seed, error: String(e && e.stack || e),
           survivalSec: 0, reachedHard: false, afterHardSec: 0, maxSoldiers: 0,
           score: 0, rank: 0, kills: 0, aliveAtCap: false, scoreCapped: false,
-          nan: false, deathPhase: "error", lastEvents: [], trapPairs: 0, decontamEvents: 0,
+          nan: false, deathPhase: "error", lastEvents: [], allTrapPairs: 0, decontamEvents: 0, evolveEvents: 0, specialEvents: 0, medianLifespan: 0, maxOnScreen: 0, pctPressure: 0, soldierLossTotal: 0,
         };
       }
       process.send({ type: "result", rec });
